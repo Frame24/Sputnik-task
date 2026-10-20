@@ -12,6 +12,7 @@ from src.models import Alert, StoredFile
 BASE_DIR = Path(__file__).resolve().parent.parent
 STORAGE_DIR = BASE_DIR / "storage" / "files"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+CHUNK_SIZE = 1024 * 1024
 
 
 async def list_files() -> list[StoredFile]:
@@ -35,15 +36,27 @@ async def get_file(file_id: str) -> StoredFile:
 
 
 async def create_file(title: str, upload_file: UploadFile) -> StoredFile:
-    content = await upload_file.read()
-    if not content:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File is empty")
-
     file_id = str(uuid4())
     suffix = Path(upload_file.filename or "").suffix
     stored_name = f"{file_id}{suffix}"
     stored_path = STORAGE_DIR / stored_name
-    stored_path.write_bytes(content)
+
+    size = 0
+    try:
+        with stored_path.open("wb") as dest:
+            while True:
+                chunk = await upload_file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                dest.write(chunk)
+                size += len(chunk)
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
+
+    if not size:
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File is empty")
 
     file_item = StoredFile(
         id=file_id,
@@ -51,7 +64,7 @@ async def create_file(title: str, upload_file: UploadFile) -> StoredFile:
         original_name=upload_file.filename or stored_name,
         stored_name=stored_name,
         mime_type=upload_file.content_type or mimetypes.guess_type(stored_name)[0] or "application/octet-stream",
-        size=len(content),
+        size=size,
         processing_status="uploaded",
     )
     async with async_session_maker() as session:
@@ -90,12 +103,3 @@ async def get_file_path(file_id: str) -> tuple[StoredFile, Path]:
     if not stored_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored file not found")
     return file_item, stored_path
-
-
-async def create_alert(file_id: str, level: str, message: str) -> Alert:
-    alert = Alert(file_id=file_id, level=level, message=message)
-    async with async_session_maker() as session:
-        session.add(alert)
-        await session.commit()
-        await session.refresh(alert)
-        return alert
